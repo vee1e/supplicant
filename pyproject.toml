@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "supplicant"
+version = "0.1.0"
+description = "Supply-chain dependency forensics: does this version look like itself?"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "supplicant" }]
+
+[project.scripts]
+supplicant = "supplicant.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["supplicant*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
