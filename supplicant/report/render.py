@@ -11,6 +11,7 @@ from typing import Any
 
 from ..graph import serialize_signal
 from ..models import DiffOutcome, ScanReport, severity_rank
+from .. import __version__ as _supplicant_version
 
 RESET = "\033[0m"
 
@@ -288,3 +289,104 @@ def render_json(report: ScanReport) -> str:
         "errors": list(report.errors),
     }
     return json.dumps(payload, indent=2)
+
+
+_SARIF_LEVEL = {
+    "critical": "error",
+    "high": "error",
+    "medium": "warning",
+    "low": "note",
+    "info": "note",
+}
+
+_SARIF_RULE_SEVERITY = {
+    "critical": "error",
+    "high": "error",
+    "medium": "warning",
+    "low": "note",
+    "info": "note",
+}
+
+SARIF_SCHEMA = "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0.json"
+SARIF_VERSION = "2.1.0"
+TOOL_NAME = "supplicant"
+TOOL_INFORMATION_URI = "https://github.com/vee1e/supplicant"
+
+
+def _sarif_rule(kind: str) -> dict:
+    """One reportingDescriptor per detector kind. SARIF dedupes results by ruleId."""
+    return {
+        "id": kind,
+        "name": kind,
+        "shortDescription": {"text": kind.replace("_", " ")},
+        "defaultConfiguration": {"level": "warning"},
+    }
+
+
+def _sarif_result(signal) -> dict:
+    """Map a Signal to a SARIF result. One result per signal."""
+    rule = {"id": signal.kind}
+    props = {
+        "severity": signal.severity,
+        "confidence": signal.confidence,
+        "reportedBy": signal.reported_by,
+        "signalId": signal.id,
+    }
+    if signal.artifact is not None:
+        props["artifact"] = signal.artifact.key
+
+    result = {
+        "ruleId": signal.kind,
+        "rule": rule,
+        "level": _SARIF_LEVEL.get(signal.severity, "warning"),
+        "message": {"text": signal.explanation or signal.kind},
+        "properties": props,
+    }
+
+    file = signal.evidence.get("file") if signal.evidence else None
+    if file:
+        location = {
+            "physicalLocation": {
+                "artifactLocation": {"uri": file, "uriBaseId": "%SRCROOT%"},
+            }
+        }
+        line = signal.evidence.get("line") if signal.evidence else None
+        if isinstance(line, int) and line > 0:
+            location["physicalLocation"]["region"] = {"startLine": line}
+        result["locations"] = [location]
+
+    return result
+
+
+def render_sarif(report: ScanReport) -> str:
+    """SARIF 2.1.0 report. One result per Signal, rules deduped by detector kind."""
+    rules: dict[str, dict] = {}
+    results: list[dict] = []
+
+    for signal in report.signals:
+        rules.setdefault(signal.kind, _sarif_rule(signal.kind))
+        results.append(_sarif_result(signal))
+
+    for outcome in report.diffs:
+        for signal in outcome.signals:
+            rules.setdefault(signal.kind, _sarif_rule(signal.kind))
+            results.append(_sarif_result(signal))
+
+    sarif = {
+        "$schema": SARIF_SCHEMA,
+        "version": SARIF_VERSION,
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": TOOL_NAME,
+                        "informationUri": TOOL_INFORMATION_URI,
+                        "version": _supplicant_version,
+                        "rules": sorted(rules.values(), key=lambda r: r["id"]),
+                    }
+                },
+                "results": results,
+            }
+        ],
+    }
+    return json.dumps(sarif, indent=2)

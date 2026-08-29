@@ -59,6 +59,7 @@ supplicant diff lodash@4.17.20 lodash@4.17.21
 |---|---|
 | `text` | scan, diff (default) |
 | `json` | scan, diff, graph |
+| `sarif` | scan, diff (SARIF 2.1.0, for GitHub code scanning) |
 | `dot` | scan, graph (default for graph) |
 | `graph` | scan |
 

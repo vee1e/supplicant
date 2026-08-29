@@ -56,13 +56,15 @@ def _load_report(ctx, kind: str, arg: str, max_depth: int) -> ScanReport:
 def _run_scan(args: argparse.Namespace) -> int:
     from . import pipeline
     from .graph import build_graph, to_dot, to_json
-    from .report.render import render_json, render_text
+    from .report.render import render_json, render_sarif, render_text
 
     ctx = pipeline.build_context(args.cache_dir, config={"osv": not args.no_osv})
     report = _load_report(ctx, args.kind, args.target, args.max_depth)
 
     if args.format == "text":
         print(render_text(report, min_severity=args.min_severity, color=not args.no_color))
+    elif args.format == "sarif":
+        print(render_sarif(report))
     else:
         if args.format == "dot":
             print(to_dot(build_graph(report.artifacts, report.edges, report.signals)))
@@ -106,7 +108,7 @@ def _parse_diff_pair(a: str, b: str):
 
 def _run_diff(args: argparse.Namespace) -> int:
     from . import pipeline
-    from .report.render import render_diff_text, render_json
+    from .report.render import render_diff_text, render_json, render_sarif
 
     try:
         ecosystem, name, v_a, v_b = _parse_diff_pair(args.version_a, args.version_b)
@@ -129,6 +131,13 @@ def _run_diff(args: argparse.Namespace) -> int:
             errors=list(ctx.config.get("_errors", [])),
         )
         print(render_json(report))
+    elif args.format == "sarif":
+        report = ScanReport(
+            artifacts=[outcome.artifact],
+            diffs=[outcome],
+            errors=list(ctx.config.get("_errors", [])),
+        )
+        print(render_sarif(report))
     else:
         print(render_diff_text(outcome, min_severity=args.min_severity, color=not args.no_color))
 
@@ -177,14 +186,14 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--kind", choices=["target", "lockfile", "manifest"], default=None,
                       help="force input interpretation (default: auto-detect from name)")
     scan.add_argument("--max-depth", type=int, default=10)
-    scan.add_argument("--format", choices=["text", "json", "dot", "graph"], default="text")
+    scan.add_argument("--format", choices=["text", "json", "dot", "graph", "sarif"], default="text")
     _add_common(scan)
     scan.set_defaults(func=_run_scan)
 
     diff = sub.add_parser("diff", help="flagship: security-scored diff of two versions")
     diff.add_argument("version_a", help="e.g. keyv@5.2.0 or npm:keyv@5.2.0")
     diff.add_argument("version_b", help="e.g. keyv@6.0.0")
-    diff.add_argument("--format", choices=["text", "json"], default="text")
+    diff.add_argument("--format", choices=["text", "json", "sarif"], default="text")
     _add_common(diff)
     diff.set_defaults(func=_run_diff)
 
