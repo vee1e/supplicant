@@ -15,7 +15,7 @@ import urllib.error
 import urllib.parse
 from pathlib import Path
 
-from ..cache import Cache
+from ..cache import Cache, _HttpGone
 from ..models import Artifact, ReleaseRecord
 from ..registries.base import FetchError, NotFoundError, Registry
 from ..utils import extract_archive, safe_token
@@ -30,7 +30,8 @@ class NpmRegistry(Registry):
     def __init__(self, cache: Cache, archive) -> None:
         super().__init__(cache, archive)
         self._tmp_dir = self.cache.root / "tmp"
-        self._tmp_dir.mkdir(parents=True, exist_ok=True)
+        from ..cache import _secure_mkdir
+        _secure_mkdir(self._tmp_dir)
 
     # ---- helpers ---------------------------------------------------------
     def _url(self, name: str) -> str:
@@ -72,7 +73,7 @@ class NpmRegistry(Registry):
 
     # ---- metadata ----------------------------------------------------------
     def metadata(self, name: str) -> dict:
-        cached = self.cache.get_json(f"npm:meta:{name}")
+        cached = self.cache.get_json(f"npm:meta:{name}", ttl=METADATA_TTL)
         if cached is not None:
             return cached
         data = self.cache.http_get(self._url(name), ttl=METADATA_TTL)
@@ -108,8 +109,10 @@ class NpmRegistry(Registry):
         tmp = self._tmp_dir / f"npm-{name.replace('/', '__')}-{safe_token(version)}.tgz"
         try:
             data = self.cache.http_get(dist_url, ttl=TARBALL_TTL)
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError):
+        except _HttpGone:
             return None
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError) as exc:
+            raise FetchError(f"failed to fetch tarball for {name}@{version}: {exc}") from exc
         tmp.write_bytes(data)
         return tmp
 
@@ -242,21 +245,36 @@ class NpmRegistry(Registry):
         v = meta.get("versions", {}).get(version) or {}
         dist = v.get("dist", {}) if isinstance(v, dict) else {}
 
-        # 1) archived copy wins (survives yanks)
-        tarball = self.archive.get_tarball(artifact)
+        # 1) archived copy wins (survives yanks) if its digest still matches.
+        expected = None
+        try:
+            expected = (self.archive.read_record(artifact) or {}).get("supplicant_sha256")
+        except Exception:
+            expected = None
+        tarball = self.archive.get_tarball(artifact, expected_sha256=expected)
         from_archive = tarball is not None
+        from_cdn = False
         # 2) live registry tarball
         if tarball is None:
             tarball = self._fetch_live_tarball(name, version, dist.get("tarball"))
             if tarball is not None and not self._verify_integrity(dist, tarball):
+                # Bad cached bytes would otherwise be reused forever (TTL 0).
+                if dist.get("tarball"):
+                    self.cache.delete_blob(f"http:{dist.get('tarball')}")
                 try:
                     tarball.unlink(missing_ok=True)
                 except OSError:
                     pass
                 raise FetchError(f"integrity check failed for {name}@{version}")
-        # 3) CDN mirror reconstruction (unpkg, then jsDelivr)
+        # 3) CDN reconstruction only when the version is truly absent.
         if tarball is None:
+            version_missing = not (isinstance(v, dict) and v)
+            if not version_missing:
+                raise FetchError(
+                    f"{name}@{version} has registry metadata but the tarball could not be fetched"
+                )
             tarball = self._reconstruct_unpkg(name, version)
+            from_cdn = tarball is not None
         if tarball is None:
             raise NotFoundError(
                 f"{name}@{version} not found in the registry, unpkg, or jsDelivr archives"
@@ -264,8 +282,11 @@ class NpmRegistry(Registry):
 
         # Extract BEFORE deleting the tmp copy; then keep only the archived one.
         extract_archive(tarball, dest)
-        if not from_archive:
-            self.archive.store_tarball(artifact, tarball)
+        digest = None
+        if not from_archive and not from_cdn:
+            stored = self.archive.store_tarball(artifact, tarball)
+            from ..utils import sha256_file
+            digest = sha256_file(stored)
             try:
                 tarball.unlink(missing_ok=True)  # keep only the archived copy
             except OSError:
@@ -277,5 +298,7 @@ class NpmRegistry(Registry):
         if isinstance(v, dict):
             record.update(v)
             record["dist"] = record.get("dist") or dist
+        if digest:
+            record["supplicant_sha256"] = digest
         self.archive.record(artifact, record)
         return dest

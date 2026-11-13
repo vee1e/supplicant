@@ -16,6 +16,15 @@ from pathlib import Path
 from typing import Optional
 
 DEFAULT_ROOT = Path.home() / ".cache" / "supplicant"
+
+
+def _secure_mkdir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
 UA = "supplicant/0.1 (+https://github.com/supplicant)"
 
 
@@ -24,8 +33,9 @@ class Cache:
         self.root = Path(root)
         self.blobs = self.root / "blobs"
         self.meta = self.root / "meta"
-        self.blobs.mkdir(parents=True, exist_ok=True)
-        self.meta.mkdir(parents=True, exist_ok=True)
+        _secure_mkdir(self.root)
+        _secure_mkdir(self.blobs)
+        _secure_mkdir(self.meta)
 
     # ---- generic key/value blobs --------------------------------------
     def _blob_path(self, key: str) -> Path:
@@ -43,21 +53,37 @@ class Cache:
 
     def put_blob(self, key: str, data: bytes) -> Path:
         p = self._blob_path(key)
-        p.parent.mkdir(parents=True, exist_ok=True)
+        _secure_mkdir(p.parent)
         tmp = p.with_name(p.name + f".{time.time_ns()}.tmp")
         tmp.write_bytes(data)
         os.replace(tmp, p)
         return p
 
     # ---- metadata (small JSON, keyed by e.g. registry:name) ------------
-    def get_json(self, key: str) -> Optional[dict]:
-        data = self.get_blob(f"json:{key}")
+    def get_json(self, key: str, ttl: int | None = None) -> Optional[dict]:
+        blob_key = f"json:{key}"
+        p = self._blob_path(blob_key)
+        if ttl is not None and ttl > 0 and p.exists():
+            try:
+                age = time.time() - p.stat().st_mtime
+            except OSError:
+                return None
+            if age >= ttl:
+                return None
+        data = self.get_blob(blob_key)
         if data is None:
             return None
         try:
             return json.loads(data)
         except (ValueError, TypeError):
             return None
+
+    def delete_blob(self, key: str) -> None:
+        p = self._blob_path(key)
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def put_json(self, key: str, value: dict) -> None:
         self.put_blob(f"json:{key}", json.dumps(value, sort_keys=True).encode())

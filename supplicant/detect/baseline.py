@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from ..detect.base import Detector
 from ..models import KIND_BASELINE, Signal
 from ..utils import looks_binary
+from .install import manifest_script_hooks
 
 if TYPE_CHECKING:
     from ..context import ScanContext
@@ -48,7 +49,20 @@ def _author_name(value) -> str:
     return str(value or "")
 
 
+def _publisher_name(version_diff) -> str:
+    """Prefer the per-version npm `_npmUser` publisher over package.json author."""
+    raw = getattr(version_diff, "raw_after", None) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    user = raw.get("_npmUser") or raw.get("npmUser")
+    name = _author_name(user)
+    if name:
+        return name
+    return ""
+
+
 def _is_install_hook(path: str) -> bool:
+
     lowered = path.lower()
     return any(token in lowered for token in INSTALL_HOOK_TOKENS)
 
@@ -147,25 +161,34 @@ class BaselineDetector(Detector):
             strong = True
             reasons.append(f"release {last_gap:.1f}d after previous vs mean {profile.mean_gap_days:.1f}d")
 
-        author_after = _author_name(version_diff.manifest_after.get("author")).lower()
+        author_after = _publisher_name(version_diff).lower() or _author_name(
+            version_diff.manifest_after.get("author")
+        ).lower()
+        authors = {a.lower() for a in profile.author_set if a}
         if (
             author_after
-            and profile.author_set
-            and not any(a in author_after or author_after in a for a in profile.author_set)
+            and authors
+            and not any(a in author_after or author_after in a for a in authors)
         ):
             medium_flags.append("author")
             reasons.append(f"author changed to {author_after!r}")
 
         repo_after = _repo_url(version_diff.manifest_after.get("repository")).lower()
+        repos = {r.lower() for r in profile.repo_urls if r}
         if (
             repo_after
-            and profile.repo_urls
-            and not any(r in repo_after or repo_after in r for r in profile.repo_urls)
+            and repos
+            and not any(r in repo_after or repo_after in r for r in repos)
         ):
             medium_flags.append("repo")
             reasons.append(f"repository changed to {repo_after!r}")
 
         added_hooks = [c.path for c in version_diff.added if _is_install_hook(c.path)]
+        before_hooks = manifest_script_hooks(version_diff.manifest_before)
+        after_hooks = manifest_script_hooks(version_diff.manifest_after)
+        for name, script in after_hooks.items():
+            if before_hooks.get(name) != script:
+                added_hooks.append(f"package.json#scripts.{name}")
         if added_hooks and not profile.install_hooks_ever:
             medium_flags.append("hook")
             reasons.append(f"new install hooks: {', '.join(added_hooks)}")
