@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from ..detect.base import Detector
 from ..models import KIND_BASELINE, Signal
 from ..utils import looks_binary
-from .install import manifest_script_hooks
+from .install import DIFF_SCRIPT_HOOKS, manifest_script_hooks
 
 if TYPE_CHECKING:
     from ..context import ScanContext
@@ -184,12 +184,12 @@ class BaselineDetector(Detector):
             reasons.append(f"repository changed to {repo_after!r}")
 
         added_hooks = [c.path for c in version_diff.added if _is_install_hook(c.path)]
-        before_hooks = manifest_script_hooks(version_diff.manifest_before)
-        after_hooks = manifest_script_hooks(version_diff.manifest_after)
+        before_hooks = manifest_script_hooks(version_diff.manifest_before, DIFF_SCRIPT_HOOKS)
+        after_hooks = manifest_script_hooks(version_diff.manifest_after, DIFF_SCRIPT_HOOKS)
         for name, script in after_hooks.items():
             if before_hooks.get(name) != script:
                 added_hooks.append(f"package.json#scripts.{name}")
-        if added_hooks and not profile.install_hooks_ever:
+        if added_hooks and not profile.install_hooks_ever and not before_hooks:
             medium_flags.append("hook")
             reasons.append(f"new install hooks: {', '.join(added_hooks)}")
 

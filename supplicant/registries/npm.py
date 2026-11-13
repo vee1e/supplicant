@@ -254,6 +254,9 @@ class NpmRegistry(Registry):
         tarball = self.archive.get_tarball(artifact, expected_sha256=expected)
         from_archive = tarball is not None
         from_cdn = False
+        if from_archive and dist and not self._verify_integrity(dist, tarball):
+            tarball = None
+            from_archive = False
         # 2) live registry tarball
         if tarball is None:
             tarball = self._fetch_live_tarball(name, version, dist.get("tarball"))
@@ -298,6 +301,7 @@ class NpmRegistry(Registry):
         if isinstance(v, dict):
             record.update(v)
             record["dist"] = record.get("dist") or dist
+        digest = digest or (self.archive.read_record(artifact) or {}).get("supplicant_sha256")
         if digest:
             record["supplicant_sha256"] = digest
         self.archive.record(artifact, record)

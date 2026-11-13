@@ -73,6 +73,22 @@ def write_original_modes(dest: Path, modes: dict[str, int]) -> None:
         return
 
 
+def original_mode(extract_dir: Path, relpath: str, fallback: int | None = None) -> int | None:
+    """Return the archive's original mode for relpath, if we recorded it."""
+    sidecar = Path(extract_dir) / MODES_FILENAME
+    if sidecar.is_file():
+        try:
+            modes = json.loads(sidecar.read_text())
+        except (OSError, ValueError, TypeError):
+            modes = {}
+        if isinstance(modes, dict) and relpath in modes:
+            try:
+                return int(modes[relpath])
+            except (TypeError, ValueError):
+                pass
+    return fallback
+
+
 def _safe_tar_extract(tf: tarfile.TarFile, dest: Path, max_size: int) -> int:
     """Extract member-by-member with path-traversal and symlink guards.
 
@@ -88,6 +104,8 @@ def _safe_tar_extract(tf: tarfile.TarFile, dest: Path, max_size: int) -> int:
         member_path = Path(member.name)
         if member_path.is_absolute() or ".." in member_path.parts:
             continue
+        if member_path.name == MODES_FILENAME or MODES_FILENAME in member_path.parts:
+            continue
         if member.issym() or member.islnk() or member.isdev() or member.isfifo():
             continue
         target = dest / member_path
@@ -98,15 +116,22 @@ def _safe_tar_extract(tf: tarfile.TarFile, dest: Path, max_size: int) -> int:
                 modes[str(member_path)] = (member.mode or 0) & 0o7777
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
+            if total + max(0, int(member.size or 0)) > max_size:
+                raise ValueError(f"archive exceeds size cap ({max_size} bytes)")
             src = tf.extractfile(member)
             if src is None:
                 continue
+            written = 0
             with src, open(target, "wb") as out:
-                shutil.copyfileobj(src, out)
-            actual = target.stat().st_size
-            total += actual
-            if total > max_size:
-                raise ValueError(f"archive exceeds size cap ({max_size} bytes)")
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    written += len(chunk)
+                    if total + written > max_size:
+                        raise ValueError(f"archive exceeds size cap ({max_size} bytes)")
+            total += written
             os.chmod(target, normalize_mode(member.mode or 0o644, is_dir=False))
             modes[str(member_path)] = (member.mode or 0) & 0o7777
         except (OSError, tarfile.TarError, ValueError) as exc:
@@ -131,6 +156,8 @@ def safe_extract_zip(path: Path, dest: Path, max_size: int = MAX_EXTRACT_SIZE) -
             name = info.filename.replace("\\", "/")
             parts = Path(name).parts
             if name.startswith("/") or any(p in (".", "..") for p in parts):
+                continue
+            if Path(name).name == MODES_FILENAME or MODES_FILENAME in parts:
                 continue
             target = dest / Path(name)
             if name.endswith("/"):
@@ -188,6 +215,8 @@ def hoist_single_dir(dest: Path) -> None:
         top = entries[0]
         prefix = top.name
         for child in top.iterdir():
+            if child.name == MODES_FILENAME:
+                continue
             shutil.move(str(child), str(dest / child.name))
         top.rmdir()
         sidecar = dest / MODES_FILENAME

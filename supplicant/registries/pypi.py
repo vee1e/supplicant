@@ -128,6 +128,7 @@ class PyPiRegistry(Registry):
         except Exception:
             expected = None
         tarball = self.archive.get_tarball(artifact, expected_sha256=expected)
+        digest = None
         if tarball is None:
             rec = self.release_info(name, version)
             file = rec.raw.get("file", {})
@@ -144,13 +145,19 @@ class PyPiRegistry(Registry):
                         f"sha256 mismatch for {name}@{version}: expected {rec.dist_sha}, got {actual}"
                     )
             stored = self.archive.store_tarball(artifact, tmp)
-            rec.raw = dict(rec.raw)
-            rec.raw["supplicant_sha256"] = sha256_file(stored)
+            digest = sha256_file(stored)
             try:
                 tmp.unlink(missing_ok=True)  # keep only the archived copy
             except OSError:
                 pass
             tarball = self.archive.get_tarball(artifact) or tmp
+        else:
+            rec = self.release_info(name, version)
+            if rec.dist_sha and sha256_file(tarball) != rec.dist_sha:
+                raise FetchError(
+                    f"sha256 mismatch for archived {name}@{version}"
+                )
+            digest = expected or sha256_file(tarball)
 
         extract_archive(tarball, dest)
         self._flatten_single_dir(dest)
@@ -158,8 +165,10 @@ class PyPiRegistry(Registry):
 
         try:
             rec = self.release_info(name, version)
-            self.archive.record(artifact, rec.raw)
+            raw = dict(rec.raw)
         except NotFoundError:
-            # version gone from live metadata; record what we know
-            self.archive.record(artifact, {"version": version})
+            raw = {"version": version}
+        if digest:
+            raw["supplicant_sha256"] = digest
+        self.archive.record(artifact, raw)
         return dest

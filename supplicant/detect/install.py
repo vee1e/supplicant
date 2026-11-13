@@ -32,6 +32,7 @@ HOOK_NAMES = [
 ]
 
 NPM_SCRIPT_HOOKS = ("preinstall", "install", "postinstall", "prepare", "prepublishOnly")
+DIFF_SCRIPT_HOOKS = ("preinstall", "install", "postinstall")
 
 ALLOWED_HOSTS = {
     "registry.npmjs.org",
@@ -81,7 +82,7 @@ DIFF_HOOK_NAMES = {
 }
 
 
-def manifest_script_hooks(manifest) -> dict[str, str]:
+def manifest_script_hooks(manifest, hook_names: tuple[str, ...] | None = None) -> dict[str, str]:
     """Return lifecycle hook name -> script text from a package.json manifest."""
     if not isinstance(manifest, dict):
         return {}
@@ -89,7 +90,8 @@ def manifest_script_hooks(manifest) -> dict[str, str]:
     if not isinstance(scripts, dict):
         return {}
     out: dict[str, str] = {}
-    for name in NPM_SCRIPT_HOOKS:
+    names = hook_names if hook_names is not None else NPM_SCRIPT_HOOKS
+    for name in names:
         script = scripts.get(name)
         if isinstance(script, str) and script.strip():
             out[name] = script
@@ -223,8 +225,8 @@ class InstallScriptDetector(Detector):
                         explanation="install hook newly introduced in this version",
                     )
                 )
-        before = manifest_script_hooks(getattr(version_diff, "manifest_before", None))
-        after = manifest_script_hooks(getattr(version_diff, "manifest_after", None))
+        before = manifest_script_hooks(getattr(version_diff, "manifest_before", None), DIFF_SCRIPT_HOOKS)
+        after = manifest_script_hooks(getattr(version_diff, "manifest_after", None), DIFF_SCRIPT_HOOKS)
         for name, script in after.items():
             if before.get(name) == script:
                 continue
@@ -232,9 +234,10 @@ class InstallScriptDetector(Detector):
             path = f"package.json#scripts.{name}"
             findings = self._analyze_hook(path, script)
             if not findings:
+                severity = "high" if kind == "added" else "medium"
                 findings = [
                     (
-                        "high",
+                        severity,
                         f"scripts.{name}",
                         f"package.json scripts.{name} {kind} in this version",
                     )

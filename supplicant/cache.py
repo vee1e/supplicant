@@ -19,11 +19,14 @@ DEFAULT_ROOT = Path.home() / ".cache" / "supplicant"
 
 
 def _secure_mkdir(path: Path) -> None:
+    path = Path(path)
+    existed = path.exists()
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        os.chmod(path, 0o700)
-    except OSError:
-        pass
+    if not existed:
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
 
 UA = "supplicant/0.1 (+https://github.com/supplicant)"
 

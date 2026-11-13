@@ -240,10 +240,13 @@ def test_project_urls_null_does_not_crash(monkeypatch, tmp_path):
 
     cache = Cache(tmp_path / "cache")
     reg = PyPiRegistry(cache, Archive(tmp_path / "archive"))
-    reg.metadata = lambda name: {  # type: ignore[method-assign]
+    payload = {
         "info": {"project_urls": None, "author": "a"},
         "releases": {"1.0.0": [{"filename": "p-1.0.0.tar.gz", "url": "https://example.invalid/p.tgz", "digests": {}}]},
+        "urls": [{"filename": "p-1.0.0.tar.gz", "url": "https://example.invalid/p.tgz", "digests": {}}],
     }
+    reg.metadata = lambda name: payload  # type: ignore[method-assign]
+    reg._version_metadata = lambda name, version: payload  # type: ignore[method-assign]
     rec = reg.release_info("p", "1.0.0")
     assert rec.artifact.version == "1.0.0"
 
@@ -278,3 +281,26 @@ def test_extract_strips_setuid(tmp_path):
     mode = (dest / "bin/tool").stat().st_mode & 0o7777
     assert mode == 0o755
     assert mode & 0o4000 == 0
+
+
+def test_extract_then_perms_flags_original_setuid(tmp_path):
+    import io, tarfile
+    from supplicant.detect.perms import PermissionsDetector
+    from supplicant.models import Artifact
+    from supplicant.utils import extract_archive
+
+    tar_path = tmp_path / "a.tgz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        info = tarfile.TarInfo("bin/tool")
+        data = b"#!/bin/sh\n"
+        info.size = len(data)
+        info.mode = 0o4755
+        tf.addfile(info, io.BytesIO(data))
+    dest = tmp_path / "out"
+    extract_archive(tar_path, dest)
+    # On disk the setuid bit is gone, but the detector must still fire.
+    assert ((dest / "bin/tool").stat().st_mode & 0o4000) == 0
+    signals = PermissionsDetector().scan_version(
+        Artifact("npm", "x", "1.0.0"), dest, make_context(tmp_path)
+    )
+    assert any("permission" in s.explanation for s in signals)

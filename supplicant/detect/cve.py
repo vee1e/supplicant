@@ -178,6 +178,10 @@ class CveDetector(Detector):
         osv_eco = OSV_ECOSYSTEMS.get(artifact.ecosystem)
         if osv_eco is None:
             return []
+        done = ctx.config.setdefault("_osv_done", set())
+        if artifact.key in done:
+            return []
+        done.add(artifact.key)
         try:
             vulns = query_osv(osv_eco, artifact.name, artifact.version)
         except Exception as exc:
