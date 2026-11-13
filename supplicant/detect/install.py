@@ -32,6 +32,7 @@ HOOK_NAMES = [
 ]
 
 NPM_SCRIPT_HOOKS = ("preinstall", "install", "postinstall", "prepare", "prepublishOnly")
+DIFF_SCRIPT_HOOKS = ("preinstall", "install", "postinstall")
 
 ALLOWED_HOSTS = {
     "registry.npmjs.org",
@@ -81,7 +82,24 @@ DIFF_HOOK_NAMES = {
 }
 
 
+def manifest_script_hooks(manifest, hook_names: tuple[str, ...] | None = None) -> dict[str, str]:
+    """Return lifecycle hook name -> script text from a package.json manifest."""
+    if not isinstance(manifest, dict):
+        return {}
+    scripts = manifest.get("scripts")
+    if not isinstance(scripts, dict):
+        return {}
+    out: dict[str, str] = {}
+    names = hook_names if hook_names is not None else NPM_SCRIPT_HOOKS
+    for name in names:
+        script = scripts.get(name)
+        if isinstance(script, str) and script.strip():
+            out[name] = script
+    return out
+
+
 class InstallScriptDetector(Detector):
+
     name = "install"
 
     def find_hooks(self, extract_dir: Path) -> list[tuple[str, str | bytes]]:
@@ -205,6 +223,41 @@ class InstallScriptDetector(Detector):
                         },
                         reported_by=self.name,
                         explanation="install hook newly introduced in this version",
+                    )
+                )
+        before = manifest_script_hooks(getattr(version_diff, "manifest_before", None), DIFF_SCRIPT_HOOKS)
+        after = manifest_script_hooks(getattr(version_diff, "manifest_after", None), DIFF_SCRIPT_HOOKS)
+        for name, script in after.items():
+            if before.get(name) == script:
+                continue
+            kind = "added" if name not in before else "changed"
+            path = f"package.json#scripts.{name}"
+            findings = self._analyze_hook(path, script)
+            if not findings:
+                severity = "high" if kind == "added" else "medium"
+                findings = [
+                    (
+                        severity,
+                        f"scripts.{name}",
+                        f"package.json scripts.{name} {kind} in this version",
+                    )
+                ]
+            for severity, pattern, explanation in findings:
+                if severity == "info":
+                    continue
+                signals.append(
+                    Signal(
+                        kind=KIND_INSTALL,
+                        artifact=version_diff.artifact,
+                        severity=severity,
+                        confidence=0.9,
+                        evidence={
+                            "file": path,
+                            "pattern": pattern,
+                            "added_in": f"{version_diff.from_version}->{version_diff.to_version}",
+                        },
+                        reported_by=self.name,
+                        explanation=f"install hook {path}: {explanation}",
                     )
                 )
         return signals

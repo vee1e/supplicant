@@ -188,6 +188,7 @@ def _version_detectors():
 
 def _diff_detectors():
     from .detect.baseline import BaselineDetector
+    from .detect.cve import CveDetector
     from .detect.fingerprint import FingerprintDetector
     from .detect.install import InstallScriptDetector
     from .detect.native import NativeBinaryDetector
@@ -201,6 +202,7 @@ def _diff_detectors():
         ObfuscationDetector(),
         NativeBinaryDetector(),
         PermissionsDetector(),
+        CveDetector(),
     ]
 
 
@@ -385,6 +387,8 @@ def scan_lockfile(ctx: ScanContext, path: str) -> ScanReport:
         seen.add(r.key)
         resolved.append(r)
     report.artifacts = resolved
+    if not resolved:
+        report.errors.append(f"resolved 0 artifacts from {path}")
 
     for a in resolved:
         _download_and_scan(ctx, a, report.errors)

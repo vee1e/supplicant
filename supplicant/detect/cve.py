@@ -50,7 +50,9 @@ def _osv_post(payload: dict, timeout: int = 20, retries: int = 1) -> dict:
         ):
             if attempt < retries:
                 time.sleep(1)
-    return {}
+                continue
+            raise
+    raise RuntimeError("OSV query failed")
 
 
 def query_osv(ecosystem: str, name: str, version: str) -> list[dict]:
@@ -149,7 +151,11 @@ def _best_raw_severity(vuln: dict) -> str:
 def _vuln_severity(vuln: dict) -> str:
     raw = _best_raw_severity(vuln)
     summary = " ".join(str(vuln.get(k) or "") for k in ("summary", "details"))
-    if re.search(r"arbitrary code|remote code|rce", summary, re.IGNORECASE) or raw == "CRITICAL":
+    vid = str(vuln.get("id") or "")
+    aliases = vuln.get("aliases") or []
+    if vid.startswith("MAL-") or any(str(a).startswith("MAL-") for a in aliases):
+        return "critical"
+    if re.search(r"arbitrary code|remote code|\brce\b", summary, re.IGNORECASE) or raw == "CRITICAL":
         return "critical"
     if raw == "HIGH":
         return "high"
@@ -172,7 +178,17 @@ class CveDetector(Detector):
         osv_eco = OSV_ECOSYSTEMS.get(artifact.ecosystem)
         if osv_eco is None:
             return []
-        vulns = query_osv(osv_eco, artifact.name, artifact.version)
+        done = ctx.config.setdefault("_osv_done", set())
+        if artifact.key in done:
+            return []
+        done.add(artifact.key)
+        try:
+            vulns = query_osv(osv_eco, artifact.name, artifact.version)
+        except Exception as exc:
+            ctx.config.setdefault("_errors", []).append(
+                f"osv {artifact.key}: {type(exc).__name__}: {exc}"
+            )
+            return []
         signals: list[Signal] = []
         for vuln in vulns:
             vid = vuln.get("id", "")
@@ -192,4 +208,4 @@ class CveDetector(Detector):
         return signals
 
     def scan_diff(self, version_diff, ctx) -> list[Signal]:
-        return []
+        return self.scan_version(version_diff.artifact, None, ctx)

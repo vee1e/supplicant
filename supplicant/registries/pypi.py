@@ -25,14 +25,15 @@ class PyPiRegistry(Registry):
     def __init__(self, cache: Cache, archive) -> None:
         super().__init__(cache, archive)
         self._tmp_dir = self.cache.root / "tmp"
-        self._tmp_dir.mkdir(parents=True, exist_ok=True)
+        from ..cache import _secure_mkdir
+        _secure_mkdir(self._tmp_dir)
 
     def _url(self, name: str) -> str:
         return "https://pypi.org/pypi/" + urllib.parse.quote(name, safe="") + "/json"
 
     # ---- metadata ----------------------------------------------------------
     def metadata(self, name: str) -> dict:
-        cached = self.cache.get_json(f"pypi:meta:{name}")
+        cached = self.cache.get_json(f"pypi:meta:{name}", ttl=METADATA_TTL)
         if cached is not None:
             return cached
         data = self.cache.http_get(self._url(name), ttl=METADATA_TTL)
@@ -62,20 +63,44 @@ class PyPiRegistry(Registry):
             ),
         )
 
+    def _version_metadata(self, name: str, version: str) -> dict:
+        cached = self.cache.get_json(f"pypi:meta:{name}:{version}", ttl=METADATA_TTL)
+        if cached is not None:
+            return cached
+        url = (
+            "https://pypi.org/pypi/"
+            + urllib.parse.quote(name, safe="")
+            + "/"
+            + urllib.parse.quote(version, safe="")
+            + "/json"
+        )
+        data = self.cache.http_get(url, ttl=METADATA_TTL)
+        meta = json.loads(data)
+        if not isinstance(meta, dict):
+            raise ValueError(f"invalid pypi metadata for {name}@{version}")
+        self.cache.put_json(f"pypi:meta:{name}:{version}", meta)
+        return meta
+
     def release_info(self, name: str, version: str) -> ReleaseRecord:
-        meta = self.metadata(name)
-        files = meta.get("releases", {}).get(version) or []
+        try:
+            meta = self._version_metadata(name, version)
+            info = meta.get("info", {}) or {}
+            files = meta.get("urls") or meta.get("releases", {}).get(version) or []
+        except Exception:
+            meta = self.metadata(name)
+            info = meta.get("info", {}) or {}
+            files = meta.get("releases", {}).get(version) or []
         file = self._pick_file(files)
         if file is None:
             raise NotFoundError(f"{name}@{version} not found")
-        info = meta.get("info", {})
         author = (
             info.get("author_email")
             or info.get("author")
             or info.get("maintainer")
             or None
         )
-        repo = info.get("project_urls", {}).get("Source") or info.get("home_page") or None
+        urls = info.get("project_urls") or {}
+        repo = (urls.get("Source") if isinstance(urls, dict) else None) or info.get("home_page") or None
         digests = file.get("digests") or {}
         return ReleaseRecord(
             artifact=Artifact("pypi", name, version),
@@ -97,7 +122,13 @@ class PyPiRegistry(Registry):
 
     def download_and_extract(self, name: str, version: str, dest: Path) -> Path:
         artifact = Artifact("pypi", name, version)
-        tarball = self.archive.get_tarball(artifact)
+        expected = None
+        try:
+            expected = (self.archive.read_record(artifact) or {}).get("supplicant_sha256")
+        except Exception:
+            expected = None
+        tarball = self.archive.get_tarball(artifact, expected_sha256=expected)
+        digest = None
         if tarball is None:
             rec = self.release_info(name, version)
             file = rec.raw.get("file", {})
@@ -108,15 +139,25 @@ class PyPiRegistry(Registry):
             if rec.dist_sha:
                 actual = sha256_file(tmp)
                 if actual != rec.dist_sha:
+                    if rec.dist_url:
+                        self.cache.delete_blob(f"http:{rec.dist_url}")
                     raise FetchError(
                         f"sha256 mismatch for {name}@{version}: expected {rec.dist_sha}, got {actual}"
                     )
-            self.archive.store_tarball(artifact, tmp)
+            stored = self.archive.store_tarball(artifact, tmp)
+            digest = sha256_file(stored)
             try:
                 tmp.unlink(missing_ok=True)  # keep only the archived copy
             except OSError:
                 pass
             tarball = self.archive.get_tarball(artifact) or tmp
+        else:
+            rec = self.release_info(name, version)
+            if rec.dist_sha and sha256_file(tarball) != rec.dist_sha:
+                raise FetchError(
+                    f"sha256 mismatch for archived {name}@{version}"
+                )
+            digest = expected or sha256_file(tarball)
 
         extract_archive(tarball, dest)
         self._flatten_single_dir(dest)
@@ -124,8 +165,10 @@ class PyPiRegistry(Registry):
 
         try:
             rec = self.release_info(name, version)
-            self.archive.record(artifact, rec.raw)
+            raw = dict(rec.raw)
         except NotFoundError:
-            # version gone from live metadata; record what we know
-            self.archive.record(artifact, {"version": version})
+            raw = {"version": version}
+        if digest:
+            raw["supplicant_sha256"] = digest
+        self.archive.record(artifact, raw)
         return dest

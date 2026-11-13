@@ -14,6 +14,8 @@ import json
 import os
 import re
 from pathlib import Path
+
+from ..detect.install import DIFF_SCRIPT_HOOKS, manifest_script_hooks
 from typing import Any, Optional
 
 from supplicant.models import Artifact, FileChange, VersionDiff
@@ -22,7 +24,7 @@ from supplicant.utils import compute_entropy, sha256_file
 # --- noise suppression -----------------------------------------------------
 
 # Small ignore list: junk that would otherwise pollute every diff.
-IGNORE_FILENAMES = {".ds_store", "thumbs.db", "desktop.ini", ".gitignore.swp"}
+IGNORE_FILENAMES = {".ds_store", "thumbs.db", "desktop.ini", ".gitignore.swp", ".supplicant-modes.json"}
 IGNORE_DIRNAMES = {"__pycache__", ".git", ".hg", ".svn", ".DS_Store"}
 
 
@@ -375,6 +377,10 @@ def compute_delta_fingerprint(diff: VersionDiff) -> str:
 
     added_hooks = sum(1 for c in added if is_install_hook_path(c.path))
     removed_hooks = sum(1 for c in removed if is_install_hook_path(c.path))
+    before_hooks = manifest_script_hooks(diff.manifest_before, DIFF_SCRIPT_HOOKS)
+    after_hooks = manifest_script_hooks(diff.manifest_after, DIFF_SCRIPT_HOOKS)
+    added_hooks += sum(1 for name in after_hooks if name not in before_hooks)
+    removed_hooks += sum(1 for name in before_hooks if name not in after_hooks)
     added_bins = sum(1 for c in added if _is_binary_like(c.path, c.size_after or 0))
     obfuscated = sum(1 for c in added if _looks_obfuscated(diff, c.path))
     author_changed = _author_changed(diff)

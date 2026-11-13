@@ -141,11 +141,11 @@ def _run_diff(args: argparse.Namespace) -> int:
     else:
         print(render_diff_text(outcome, min_severity=args.min_severity, color=not args.no_color))
 
-    if ctx.config.get("_errors"):
-        return EXIT_ERROR
     floor = severity_rank(args.min_severity)
     if any(severity_rank(s.severity) >= floor for s in outcome.signals):
         return EXIT_FINDINGS
+    if ctx.config.get("_errors"):
+        return EXIT_ERROR
     return EXIT_OK
 
 

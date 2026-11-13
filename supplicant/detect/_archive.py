@@ -6,6 +6,7 @@ re-implementing the same archive walk.
 from __future__ import annotations
 
 from ..models import Artifact
+from ..utils import original_mode
 
 
 def archive_read(ctx, version_diff, relpath: str, n: int = 8192):
@@ -43,7 +44,7 @@ def archive_mode(ctx, version_diff, relpath: str):
         p = base / relpath
         if p.is_file():
             try:
-                return p.stat().st_mode
+                return original_mode(base, relpath, p.stat().st_mode)
             except OSError:
                 return None
     return None

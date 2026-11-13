@@ -10,6 +10,8 @@ import fnmatch
 import re
 from pathlib import Path
 
+from ..utils import MODES_FILENAME, original_mode
+
 from ..models import Artifact, KIND_PERMS, Signal
 from ._archive import archive_mode
 from .base import Detector
@@ -112,11 +114,13 @@ class PermissionsDetector(Detector):
         for p in sorted(extract_dir.rglob("*")):
             if not p.is_file():
                 continue
+            relpath = str(p.relative_to(extract_dir))
+            if p.name == MODES_FILENAME:
+                continue
             try:
-                mode = p.stat().st_mode
+                mode = original_mode(extract_dir, relpath, p.stat().st_mode)
             except OSError:
                 continue
-            relpath = str(p.relative_to(extract_dir))
             if self._suspicious_mode(mode):
                 signals.append(
                     Signal(

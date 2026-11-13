@@ -33,10 +33,7 @@ def parse_lockfile(path: str) -> list[Artifact]:
         if filename == "Pipfile.lock":
             return _parse_pipfile(p)
         if filename == "poetry.lock":
-            try:
-                return _parse_poetry(p.read_text())
-            except Exception:
-                return []
+            return _parse_poetry(p.read_text())
         raise ValueError(f"unsupported lockfile: {filename}")
     except ValueError:
         raise
@@ -61,8 +58,9 @@ def _parse_npm_lock(p: Path) -> list[Artifact]:
             version = entry.get("version")
             if version:
                 # Nested deps look like "node_modules/a/node_modules/b": the
-                # artifact name is the last node_modules component.
-                name = key.rsplit("node_modules/", 1)[1]
+                # artifact name is the last node_modules component, unless an
+                # alias recorded the real package in entry["name"].
+                name = entry.get("name") or key.rsplit("node_modules/", 1)[1]
                 out.append(Artifact("npm", name, version))
         return out
 

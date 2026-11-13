@@ -6,6 +6,7 @@ Stdlib only. No network here — that lives in cache.py / registries.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import shutil
@@ -51,39 +52,93 @@ def compute_entropy(data: bytes) -> float:
     return entropy
 
 
+MODES_FILENAME = ".supplicant-modes.json"
+
+
+def normalize_mode(mode: int, is_dir: bool = False) -> int:
+    """Drop setuid/setgid/sticky/world-write; keep the file readable."""
+    mode = mode & 0o777
+    mode &= ~0o002
+    if is_dir or (mode & 0o111):
+        return 0o755
+    return 0o644
+
+
+def write_original_modes(dest: Path, modes: dict[str, int]) -> None:
+    if not modes:
+        return
+    try:
+        (dest / MODES_FILENAME).write_text(json.dumps(modes, sort_keys=True))
+    except OSError:
+        return
+
+
+def original_mode(extract_dir: Path, relpath: str, fallback: int | None = None) -> int | None:
+    """Return the archive's original mode for relpath, if we recorded it."""
+    sidecar = Path(extract_dir) / MODES_FILENAME
+    if sidecar.is_file():
+        try:
+            modes = json.loads(sidecar.read_text())
+        except (OSError, ValueError, TypeError):
+            modes = {}
+        if isinstance(modes, dict) and relpath in modes:
+            try:
+                return int(modes[relpath])
+            except (TypeError, ValueError):
+                pass
+    return fallback
+
+
 def _safe_tar_extract(tf: tarfile.TarFile, dest: Path, max_size: int) -> int:
     """Extract member-by-member with path-traversal and symlink guards.
 
     Link members (symlink/hardlink/device) are skipped entirely so a single
     malicious link can't abort the whole archive or escape the dest dir.
-    File modes (incl. setuid/world-writable, which tarfile's "data" filter
-    would strip) are preserved so permission detectors can inspect them.
+    Original modes are recorded in `.supplicant-modes.json` for permission
+    detectors; on-disk modes are normalised (no setuid/setgid/sticky/world-write).
     """
     total = 0
+    modes: dict[str, int] = {}
     dest.mkdir(parents=True, exist_ok=True)
     for member in tf.getmembers():
         member_path = Path(member.name)
         if member_path.is_absolute() or ".." in member_path.parts:
             continue
+        if member_path.name == MODES_FILENAME or MODES_FILENAME in member_path.parts:
+            continue
         if member.issym() or member.islnk() or member.isdev() or member.isfifo():
             continue
-        total += member.size
-        if total > max_size:
-            raise ValueError(f"archive exceeds size cap ({max_size} bytes)")
         target = dest / member_path
         try:
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
+                os.chmod(target, normalize_mode(member.mode or 0o755, is_dir=True))
+                modes[str(member_path)] = (member.mode or 0) & 0o7777
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
+            if total + max(0, int(member.size or 0)) > max_size:
+                raise ValueError(f"archive exceeds size cap ({max_size} bytes)")
             src = tf.extractfile(member)
             if src is None:
                 continue
+            written = 0
             with src, open(target, "wb") as out:
-                shutil.copyfileobj(src, out)
-            os.chmod(target, member.mode & 0o7777)
-        except (OSError, tarfile.TarError, ValueError):
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    written += len(chunk)
+                    if total + written > max_size:
+                        raise ValueError(f"archive exceeds size cap ({max_size} bytes)")
+            total += written
+            os.chmod(target, normalize_mode(member.mode or 0o644, is_dir=False))
+            modes[str(member_path)] = (member.mode or 0) & 0o7777
+        except (OSError, tarfile.TarError, ValueError) as exc:
+            if isinstance(exc, ValueError) and "size cap" in str(exc):
+                raise
             continue
+    write_original_modes(dest, modes)
     return total
 
 
@@ -94,17 +149,41 @@ def safe_extract_tar(path: Path, dest: Path, max_size: int = MAX_EXTRACT_SIZE) -
 
 def safe_extract_zip(path: Path, dest: Path, max_size: int = MAX_EXTRACT_SIZE) -> int:
     total = 0
+    modes: dict[str, int] = {}
+    dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path) as zf:
         for info in zf.infolist():
             name = info.filename.replace("\\", "/")
             parts = Path(name).parts
             if name.startswith("/") or any(p in (".", "..") for p in parts):
                 continue
-            total += info.file_size
-            if total > max_size:
-                raise ValueError(f"archive exceeds size cap ({max_size} bytes)")
-        zf.extractall(dest)
+            if Path(name).name == MODES_FILENAME or MODES_FILENAME in parts:
+                continue
+            target = dest / Path(name)
+            if name.endswith("/"):
+                target.mkdir(parents=True, exist_ok=True)
+                os.chmod(target, normalize_mode(0o755, is_dir=True))
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as src, open(target, "wb") as out:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        total += len(chunk)
+                        if total > max_size:
+                            raise ValueError(f"archive exceeds size cap ({max_size} bytes)")
+                os.chmod(target, normalize_mode(info.external_attr >> 16 if info.external_attr else 0o644))
+                modes[name] = (info.external_attr >> 16) & 0o7777
+            except (OSError, zipfile.BadZipFile) as exc:
+                if isinstance(exc, ValueError):
+                    raise
+                continue
+    write_original_modes(dest, modes)
     return total
+
 
 
 def extract_archive(path: Path, dest: Path) -> int:
@@ -130,12 +209,30 @@ def hoist_single_dir(dest: Path) -> None:
     npm tarballs wrap everything in package/; sdists wrap in name-version/.
     Wheels (multiple top-level entries) are left untouched.
     """
-    entries = [p for p in Path(dest).iterdir()]
+    dest = Path(dest)
+    entries = [p for p in dest.iterdir() if p.name != MODES_FILENAME]
     if len(entries) == 1 and entries[0].is_dir():
         top = entries[0]
+        prefix = top.name
         for child in top.iterdir():
-            shutil.move(str(child), str(Path(dest) / child.name))
+            if child.name == MODES_FILENAME:
+                continue
+            shutil.move(str(child), str(dest / child.name))
         top.rmdir()
+        sidecar = dest / MODES_FILENAME
+        if sidecar.exists():
+            try:
+                modes = json.loads(sidecar.read_text())
+                remapped = {}
+                for key, mode in modes.items():
+                    parts = Path(key).parts
+                    if parts and parts[0] == prefix:
+                        remapped[str(Path(*parts[1:])) if len(parts) > 1 else key] = mode
+                    else:
+                        remapped[key] = mode
+                sidecar.write_text(json.dumps(remapped, sort_keys=True))
+            except (OSError, ValueError):
+                pass
 
 
 def file_magic(path: Path) -> Optional[str]:

@@ -212,3 +212,95 @@ def test_npm_download_first_attempt(tmp_path, monkeypatch):
     dest = tmp_path / "out"
     reg.download_and_extract("fakepkg", "1.0.0", dest)
     assert (dest / "index.js").exists()
+
+
+def test_diff_flags_package_json_postinstall(tmp_path):
+    from supplicant.detect.install import InstallScriptDetector
+    from supplicant.models import VersionDiff
+
+    before = make_tree(tmp_path / "b", {"package.json": json.dumps({"name": "x", "scripts": {"test": "echo ok"}})})
+    after = make_tree(tmp_path / "a", {"package.json": json.dumps({"name": "x", "scripts": {"test": "echo ok", "postinstall": "node lib/telemetry.js"}})})
+    diff = diff_versions(before, after, "npm", "x", "1.0.0", "2.0.0")
+    signals = InstallScriptDetector().scan_diff(diff, make_context(tmp_path))
+    assert any("scripts.postinstall" in (s.evidence or {}).get("file", "") or "postinstall" in s.explanation for s in signals)
+
+
+def test_vuln_severity_word_boundary_and_mal():
+    from supplicant.detect.cve import _vuln_severity
+
+    assert _vuln_severity({"summary": "resource exhaustion", "severity": "LOW"}) == "low"
+    assert _vuln_severity({"id": "MAL-2024-1", "summary": "malicious package"}) == "critical"
+    assert _vuln_severity({"summary": "remote code execution"}) == "critical"
+
+
+def test_project_urls_null_does_not_crash(monkeypatch, tmp_path):
+    from supplicant.cache import Cache
+    from supplicant.registries.archive import Archive
+    from supplicant.registries.pypi import PyPiRegistry
+
+    cache = Cache(tmp_path / "cache")
+    reg = PyPiRegistry(cache, Archive(tmp_path / "archive"))
+    payload = {
+        "info": {"project_urls": None, "author": "a"},
+        "releases": {"1.0.0": [{"filename": "p-1.0.0.tar.gz", "url": "https://example.invalid/p.tgz", "digests": {}}]},
+        "urls": [{"filename": "p-1.0.0.tar.gz", "url": "https://example.invalid/p.tgz", "digests": {}}],
+    }
+    reg.metadata = lambda name: payload  # type: ignore[method-assign]
+    reg._version_metadata = lambda name, version: payload  # type: ignore[method-assign]
+    rec = reg.release_info("p", "1.0.0")
+    assert rec.artifact.version == "1.0.0"
+
+
+def test_lockfile_uses_alias_package_name(tmp_path):
+    from supplicant.resolvers.lockfile import parse_lockfile
+
+    p = tmp_path / "package-lock.json"
+    p.write_text(json.dumps({
+        "packages": {
+            "": {"name": "app"},
+            "node_modules/foo": {"version": "1.0.0", "name": "evil", "resolved": "https://registry.npmjs.org/evil/-/evil-1.0.0.tgz"},
+        }
+    }))
+    arts = parse_lockfile(str(p))
+    assert arts[0].name == "evil"
+
+
+def test_extract_strips_setuid(tmp_path):
+    import io, os, tarfile
+    from supplicant.utils import extract_archive, normalize_mode
+
+    tar_path = tmp_path / "a.tgz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        info = tarfile.TarInfo("bin/tool")
+        data = b"#!/bin/sh\n"
+        info.size = len(data)
+        info.mode = 0o4755
+        tf.addfile(info, io.BytesIO(data))
+    dest = tmp_path / "out"
+    extract_archive(tar_path, dest)
+    mode = (dest / "bin/tool").stat().st_mode & 0o7777
+    assert mode == 0o755
+    assert mode & 0o4000 == 0
+
+
+def test_extract_then_perms_flags_original_setuid(tmp_path):
+    import io, tarfile
+    from supplicant.detect.perms import PermissionsDetector
+    from supplicant.models import Artifact
+    from supplicant.utils import extract_archive
+
+    tar_path = tmp_path / "a.tgz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        info = tarfile.TarInfo("bin/tool")
+        data = b"#!/bin/sh\n"
+        info.size = len(data)
+        info.mode = 0o4755
+        tf.addfile(info, io.BytesIO(data))
+    dest = tmp_path / "out"
+    extract_archive(tar_path, dest)
+    # On disk the setuid bit is gone, but the detector must still fire.
+    assert ((dest / "bin/tool").stat().st_mode & 0o4000) == 0
+    signals = PermissionsDetector().scan_version(
+        Artifact("npm", "x", "1.0.0"), dest, make_context(tmp_path)
+    )
+    assert any("permission" in s.explanation for s in signals)
